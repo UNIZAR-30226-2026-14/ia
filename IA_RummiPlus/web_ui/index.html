@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RummiPlus Arena</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <aside class="history-sidebar" id="historySidebar">
+                <button type="button" class="history-toggle" id="historyToggle" aria-expanded="false">
+                  <span class="history-toggle-icon">◀</span>
+                </button>
+        <div class="history-content" id="historyContent">
+          <section class="history-create">
+            <h3>Crear múltiples partidas</h3>
+            <div class="history-form">
+              <div class="history-form-row">
+                <label class="compact-label">Cantidad <input type="number" id="batchCount" min="1" max="50" value="5" /></label>
+                <label class="compact-label">Bots <select id="batchBotCount">
+                  <option value="2">2</option>
+                  <option value="3" selected>3</option>
+                  <option value="4">4</option>
+                </select></label>
+                <label class="compact-label">Aleatoriedad <input type="number" id="batchRandomness" step="0.05" min="0" max="1" value="0.25" /></label>
+                <label class="compact-label">Max turnos <input type="number" id="batchMaxTurns" value="300" min="1" /></label>
+              </div>
+              <div id="batchBotLevels" class="batch-bot-levels"></div>
+              <div class="history-form-row">
+                <label class="checkline compact-check">
+                  <input type="checkbox" id="batchRandomLevels" />
+                  <span>Niveles aleatorios</span>
+                </label>
+                <label class="checkline compact-check">
+                  <input type="checkbox" id="batchRandomRandomness" />
+                  <span>Aleatoriedad variable</span>
+                </label>
+                <label class="checkline compact-check">
+                  <input type="checkbox" id="batchRandomMaxTurns" />
+                  <span>Max turnos variable</span>
+                </label>
+                <label class="checkline compact-check">
+                  <input type="checkbox" id="batchRandomSeed" />
+                  <span>Seed aleatorio</span>
+                </label>
+              </div>
+              <div class="history-form-row">
+                <label class="compact-label">Seed inicial <input type="number" id="batchSeed" value="1000" /></label>
+              </div>
+              <div id="batchProgress" class="batch-progress" style="display: none;">
+                <div class="batch-progress-bar">
+                  <div class="batch-progress-fill" id="batchProgressFill"></div>
+                </div>
+                <div class="batch-progress-text" id="batchProgressText">0 / 0</div>
+              </div>
+              <button type="button" id="batchCreateBtn" class="primary-btn">Crear partidas</button>
+            </div>
+          </section>
+          <section class="history-stats">
+            <h3>Estadísticas</h3>
+            <div id="historyStats" class="history-stats-content"></div>
+          </section>
+          <section class="history-list">
+            <div class="history-list-header">
+              <h3>Partidas creadas</h3>
+              <button type="button" id="historyClearBtn" class="history-clear-btn" title="Eliminar todas las partidas">
+                🗑️
+              </button>
+            </div>
+            <div id="historyList" class="history-items"></div>
+          </section>
+        </div>
+      </aside>
+      <div class="app-content">
+      <header class="topbar">
+        <div class="topbar-left">
+          <div class="topbar-title">
+            <h1>RummiPlus Arena</h1>
+            <p class="subtitle">Simulador visual de Rummikub</p>
+          </div>
+          <div class="topbar-pool pool-panel pool-wrap">
+            <button type="button" class="pool-toggle" id="poolToggle" aria-expanded="false">
+              <span class="pool-toggle-text">Bolsa</span>
+              <span class="pool-toggle-icon">▼</span>
+            </button>
+            <div id="poolSummary" class="pool-summary"></div>
+            <div class="pool-detail-wrap">
+              <div id="poolMeta" class="pool-meta">—</div>
+              <div id="poolTilesView" class="pool-tiles"></div>
+            </div>
+          </div>
+        </div>
+        <div class="status-pill" id="serverStatus">Servidor conectado</div>
+      </header>
+
+      <section class="playback">
+        <button id="firstBtn">Inicio</button>
+        <button id="prevBtn">Anterior</button>
+        <button id="playBtn">Reproducir</button>
+        <button id="nextBtn">Siguiente</button>
+        <button id="lastBtn">Final</button>
+        <label>Velocidad <select id="speedSelect">
+          <option value="1300">Lenta</option>
+          <option value="700" selected>Media</option>
+          <option value="300">Rápida</option>
+        </select></label>
+        <input id="turnSlider" type="range" min="0" max="0" value="0" />
+        <span id="turnLabel">Turno 0/0</span>
+      </section>
+
+      <div class="game-area">
+        <aside class="menu-col">
+          <section class="panel menu-panel">
+            <h2>Partida</h2>
+            <div class="field-grid">
+              <label>Bots <select id="botCount">
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="4">4</option>
+              </select></label>
+              <div id="botLevels" class="bot-levels"></div>
+              <label>Aleatoriedad <input id="randomness" type="number" step="0.05" min="0" max="1" value="0.25" /></label>
+              <label>Seed <input id="seed" type="number" value="1234" /></label>
+              <label>Max turnos <input id="maxTurns" type="number" value="300" min="1" /></label>
+            </div>
+            <div class="preset-row">
+              <button class="ghost-btn" data-preset="balanced">Equilibrado</button>
+              <button class="ghost-btn" data-preset="competitive">Competitivo</button>
+              <button class="ghost-btn" data-preset="chaos">Caótico</button>
+            </div>
+            <button id="runBtn" class="primary-btn">Iniciar simulación</button>
+          </section>
+          <section class="panel">
+            <h2>Ranking (según turno actual)</h2>
+            <div id="rankingBars" class="ranking-bars"></div>
+          </section>
+        </aside>
+
+        <section class="board-col">
+          <section class="panel board-panel">
+            <div class="board-header">
+              <h2>Tablero</h2>
+              <div class="board-header-right">
+                <span id="gameState" class="game-state">—</span>
+                <span id="turnInfo" class="turn-info">Sin datos.</span>
+              </div>
+            </div>
+            <div id="boardView" class="board-grid"></div>
+          </section>
+        </section>
+
+        <aside class="players-col">
+          <section class="panel players-panel">
+            <h2>Jugadores</h2>
+            <label class="checkline">
+              <input id="compactRacks" type="checkbox" /> Compacto
+            </label>
+            <div id="racksView" class="racks"></div>
+          </section>
+        </aside>
+      </div>
+
+      <section class="panel timeline-panel timeline-wrap">
+        <button type="button" class="timeline-toggle" id="timelineToggle" aria-expanded="false">
+          <span class="timeline-toggle-text">Línea temporal de jugadas</span>
+          <span class="timeline-toggle-icon">▼</span>
+        </button>
+        <div id="timelinePreview" class="timeline-preview" aria-hidden="true">—</div>
+        <div class="timeline-inner" id="timelineInner">
+          <div class="timeline-search">
+            <input type="text" id="timelineSearch" placeholder="Buscar en línea temporal (ej: reorganizar, PASAR, extender...)" />
+            <button type="button" id="timelineSearchClear" title="Limpiar búsqueda">✕</button>
+            <label class="timeline-show-all">
+              <input type="checkbox" id="timelineShowAll" />
+              <span>Ver todas las líneas</span>
+            </label>
+          </div>
+          <div id="logView" class="log"></div>
+        </div>
+      </section>
+      </div>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
