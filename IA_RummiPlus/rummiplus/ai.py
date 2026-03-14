@@ -51,20 +51,29 @@ class StrategicBot:
         if not options:
             return Move(move_type=MoveType.PASS_TURN, reason="sin opciones legales")
 
-        if self.config.level >= 4 and len(options) > 1:
+        if self.config.level >= 3 and len(options) > 1:
             options = self._score_with_search(state, player_idx, options)
         return self._select_option(options).move
+
+    def _effective_limits(self) -> tuple[int, int, int]:
+        """Límites de opciones según nivel: menos opciones = bots bajos más débiles."""
+        skill = self.config.skill()
+        max_open = max(5, min(self.config.max_opening_options, int(5 + skill * 35)))
+        max_regular = max(10, min(self.config.max_regular_options, int(10 + skill * 50)))
+        replace_max = max(15, min(50, int(15 + skill * 35)))
+        return max_open, max_regular, replace_max
 
     def _generate_options(self, state: GameState, player_idx: int) -> list[ScoredMove]:
         player = state.players[player_idx]
         options: list[ScoredMove] = []
         rack = player.rack
+        max_open, max_regular, replace_max = self._effective_limits()
 
         if not player.opened:
             opening = find_opening_combos(
                 rack,
                 min_points=30,
-                limit=self.config.max_opening_options,
+                limit=max_open,
             )
             for melds in opening:
                 if opening_points(melds) < 30:
@@ -159,7 +168,6 @@ class StrategicBot:
         # Solo si el jugador ya abrió y hay melds en el tablero.
         if player.opened and state.board.melds:
             replace_count = 0
-            replace_max = 50
             pool_size = len(state.pool)
             # Bonus por reorganizar cuando la bolsa está vacía o casi vacía.
             pool_bonus = max(0, (100 - pool_size) * 0.25) if pool_size < 50 else 0.0
@@ -333,11 +341,10 @@ class StrategicBot:
         )
         options = sorted(options, key=lambda o: o.score, reverse=True)
         # Aumentar límite si hay reorganizaciones para no cortarlas demasiado pronto.
-        limit = self.config.max_regular_options
         has_replace = any(o.move.move_type == MoveType.REPLACE_BOARD for o in options)
         if has_replace:
-            limit = max(limit, 80)
-        options = options[:limit]
+            max_regular = max(max_regular, 80)
+        options = options[:max_regular]
         return self._filter_legal(state, player_idx, options)
 
     def _filter_legal(
@@ -364,9 +371,12 @@ class StrategicBot:
     ) -> list[ScoredMove]:
         self._search_cache.clear()
         skill = self.config.skill()
-        depth = min(self.config.search_depth_cap, 1 + int(skill * 3))
-        beam = min(self.config.search_beam_cap, 4 + int(skill * 10))
-        candidate_count = min(len(options), 3 + int(skill * 9))
+        # Nivel 3 usa búsqueda mínima; niveles altos escalan depth/beam/candidatos.
+        depth = min(self.config.search_depth_cap, int(skill * 4))  # 0 en nivel 3, 1-3 en 4-10
+        if depth < 1 and self.config.level >= 4:
+            depth = 1
+        beam = min(self.config.search_beam_cap, 2 + int(skill * 12))
+        candidate_count = min(len(options), 2 + int(skill * 10))
 
         deadline = time.perf_counter() + max(0.01, self.config.search_time_ms / 1000.0)
         rescored: list[ScoredMove] = []
@@ -556,8 +566,10 @@ class StrategicBot:
 
         skill = self.config.skill()
         randomness = min(1.0, max(0.0, self.config.randomness))
-        effective_noise = min(1.0, randomness + (1.0 - skill) * 0.55)
-        blunder_prob = min(0.90, 0.03 + (1.0 - skill) * 0.60 + randomness * 0.12)
+        effective_noise = min(1.0, randomness + (1.0 - skill) * 0.65)
+        # Niveles bajos blandean más; niveles altos casi siempre eligen entre las mejores.
+        blunder_base = 0.08 if skill >= 0.5 else (0.25 - skill * 0.4)
+        blunder_prob = min(0.92, blunder_base + (1.0 - skill) * 0.55 + randomness * 0.15)
 
         sorted_opts = sorted(options, key=lambda o: o.score, reverse=True)
         if self.rng.random() < blunder_prob and len(sorted_opts) > 2:
