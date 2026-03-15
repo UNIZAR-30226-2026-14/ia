@@ -1,3 +1,34 @@
+"""
+Bot de Rummikub basado en reglas, heurísticas y búsqueda acotada .
+
+Es un agente simbólico que combina (1) generación de jugadas legales por reglas, (2) puntuación
+heurística de cada jugada y (3) look-ahead opcional con minimax y poda por haz (beam).
+
+Flujo de tratamiento de la información para obtener una respuesta:
+  1. Generar opciones: a partir del estado (tablero, mi rack) se generan candidatos
+     (aperturas ≥30 pts, melds nuevos, extensiones, reorganizaciones, pasar). Los límites
+     de cuántas opciones se generan dependen del nivel (niveles bajos ven menos opciones).
+  2. Filtrar legales: se valida cada candidato con las reglas del juego y se descartan
+     los inválidos.
+  3. Puntuación heurística: cada opción se puntúa con _evaluate_used_tiles (puntos
+     jugados, fichas usadas, fichas restantes en mano, bonus por vaciar mano).
+     Esta función no usa información de rivales.
+  4. Búsqueda (nivel ≥3): se hace minimax con poda por haz (beam) y límite de tiempo.
+     Se simulan jugadas alternativas, se evalúa el estado resultante con _evaluate_state
+     (puntos en mano propias y ajenas, si hemos abierto, densidad del tablero) y se
+     combina el score de la opción con el valor futuro ponderado. En modo fairplay
+     _evaluate_state usa solo el número de fichas de cada rival (opponent_rack_counts),
+     no sus fichas concretas. La firma del estado (tablero + racks o conteos) se usa
+     para caché y, en fairplay, sin UIDs de otros.
+  5. Selección final: no se elige siempre la mejor; se aplica ruido (aleatoriedad) y
+     muestreo por temperatura sobre los scores para que los bots cometan errores
+     ocasionales y los niveles bajos sean más débiles.
+
+Modificaciones respecto a un “minimax estándar”: límite de tiempo por turno, beam (solo
+se exploran las N mejores opciones por nivel), profundidad acotada y evaluación
+heurística en hoja (no hay función de valor aprendida).
+"""
+
 from __future__ import annotations
 
 import math
@@ -18,6 +49,10 @@ from .rules import (
 
 @dataclass(frozen=True)
 class BotConfig:
+    """
+    Parámetros del bot: nivel 1-10, aleatoriedad, seed y límites de generación/búsqueda.
+    skill() devuelve un float 0..1 que escala con el nivel.
+    """
     level: int = 5
     randomness: float = 0.25
     seed: int | None = None
@@ -28,12 +63,14 @@ class BotConfig:
     search_beam_cap: int = 14
 
     def skill(self) -> float:
+        """Factor de habilidad 0..1 según level (1→0, 10→1)."""
         lvl = max(1, min(10, self.level))
         return (lvl - 1) / 9.0
 
 
 @dataclass
 class ScoredMove:
+    """Jugada con su puntuación heurística, fichas usadas y texto de depuración."""
     move: Move
     score: float
     used_tiles: list[Tile]
@@ -41,12 +78,21 @@ class ScoredMove:
 
 
 class StrategicBot:
+    """
+    Bot que elige jugadas: genera candidatos, los puntúa (y opcionalmente busca
+    con minimax+beam) y selecciona con ruido/temperatura según nivel.
+    """
+
     def __init__(self, config: BotConfig) -> None:
         self.config = config
         self.rng = random.Random(config.seed)
         self._search_cache: dict[tuple[str, int, int], float] = {}
 
     def choose_move(self, state: GameState, player_idx: int) -> Move:
+        """
+        Decide la jugada para el jugador player_idx dado el estado.
+        Genera opciones legales, las re-puntúa con búsqueda si level≥3 y elige una.
+        """
         options = self._generate_options(state, player_idx)
         if not options:
             return Move(move_type=MoveType.PASS_TURN, reason="sin opciones legales")
@@ -56,7 +102,10 @@ class StrategicBot:
         return self._select_option(options).move
 
     def _effective_limits(self) -> tuple[int, int, int]:
-        """Límites de opciones según nivel: menos opciones = bots bajos más débiles."""
+        """
+        Límites de opciones según nivel: menos opciones para niveles bajos
+        (max_open, max_regular, replace_max).
+        """
         skill = self.config.skill()
         max_open = max(5, min(self.config.max_opening_options, int(5 + skill * 35)))
         max_regular = max(10, min(self.config.max_regular_options, int(10 + skill * 50)))
@@ -64,11 +113,17 @@ class StrategicBot:
         return max_open, max_regular, replace_max
 
     def _generate_options(self, state: GameState, player_idx: int) -> list[ScoredMove]:
+        """
+        Genera candidatos de jugada: aperturas ≥30, melds nuevos, extensiones,
+        reorganizaciones de tablero y pasar. Cada uno se puntúa con heurística.
+        Al final se filtran solo las legales y se recorta por max_regular/max_open.
+        """
         player = state.players[player_idx]
         options: list[ScoredMove] = []
         rack = player.rack
         max_open, max_regular, replace_max = self._effective_limits()
 
+        # --- Fase de apertura: combinaciones que sumen ≥30 puntos ---
         if not player.opened:
             opening = find_opening_combos(
                 rack,
@@ -102,7 +157,7 @@ class StrategicBot:
             )
             return self._filter_legal(state, player_idx, options)
 
-        # Jugadas normales: nuevos grupos/escaleras desde rack.
+        # --- Jugadas normales: nuevos grupos/escaleras desde rack ---
         # Reducir ligeramente el score para favorecer reorganizaciones cuando hay tablero
         melds = generate_meld_candidates(rack, max_size=5)
         board_penalty = -1.0 if state.board.melds else 0.0  # Penalizar jugadas nuevas si hay tablero
@@ -164,8 +219,7 @@ class StrategicBot:
                     )
                 )
 
-        # Reorganizar tablero: coger fichas de melds y formar nuevos conjuntos con la mano.
-        # Solo si el jugador ya abrió y hay melds en el tablero.
+        # --- Reorganizar tablero: quitar fichas de melds existentes y formar nuevos con la mano ---
         if player.opened and state.board.melds:
             replace_count = 0
             pool_size = len(state.pool)
@@ -350,6 +404,10 @@ class StrategicBot:
     def _filter_legal(
         self, state: GameState, player_idx: int, options: list[ScoredMove]
     ) -> list[ScoredMove]:
+        """
+        Descarta opciones que no pasen validate_move. Si ninguna es legal,
+        devuelve una única opción de pasar (fallback).
+        """
         legal: list[ScoredMove] = []
         for option in options:
             ok, _ = validate_move(state, player_idx, option.move)
@@ -369,9 +427,13 @@ class StrategicBot:
     def _score_with_search(
         self, state: GameState, root_idx: int, options: list[ScoredMove]
     ) -> list[ScoredMove]:
+        """
+        Re-puntúa las mejores opciones combinando score heurístico con el valor
+        minimax del estado tras simular la jugada (limitado por tiempo, beam y profundidad).
+        """
         self._search_cache.clear()
         skill = self.config.skill()
-        # Nivel 3 usa búsqueda mínima; niveles altos escalan depth/beam/candidatos.
+        # Profundidad y haz según nivel: nivel 3 búsqueda mínima; altos escalan.
         depth = min(self.config.search_depth_cap, int(skill * 4))  # 0 en nivel 3, 1-3 en 4-10
         if depth < 1 and self.config.level >= 4:
             depth = 1
@@ -423,6 +485,11 @@ class StrategicBot:
         beam: int,
         deadline: float,
     ) -> float:
+        """
+        Valor minimax del estado para el jugador root_idx: maximiza si es su turno,
+        minimiza si es turno de rival. Se exploran solo las primeras 'beam' opciones;
+        resultados se cachean por firma del estado + turno + profundidad.
+        """
         if time.perf_counter() >= deadline:
             return self._evaluate_state(state, root_idx)
         if depth <= 0:
@@ -445,6 +512,7 @@ class StrategicBot:
                 )
             ]
 
+        # Maximizar si es el jugador que evalúa; minimizar si es el rival.
         if current_idx == root_idx:
             best = -1e18
             for option in current_options:
@@ -497,6 +565,24 @@ class StrategicBot:
         return worst
 
     def _state_signature(self, state: GameState) -> str:
+        """
+        Firma única del estado para la caché de búsqueda. En fairplay no incluye
+        UIDs de otros jugadores (solo conteos), para no filtrar información oculta.
+        """
+        if state.opponent_rack_counts is not None:
+            racks = []
+            for i, player in enumerate(state.players):
+                if player.rack:
+                    rack_ids = ",".join(str(uid) for uid in sorted(t.uid for t in player.rack))
+                    racks.append(f"{int(player.opened)}:{rack_ids}")
+                else:
+                    cnt = state.opponent_rack_counts[i] if i < len(state.opponent_rack_counts) else 0
+                    racks.append(f"{int(player.opened)}:c{cnt}")
+            melds = []
+            for meld in state.board.melds:
+                meld_ids = ",".join(str(uid) for uid in sorted(t.uid for t in meld.tiles))
+                melds.append(meld_ids)
+            return "|".join([";".join(racks), ";".join(melds), str(len(state.pool))])
         racks = []
         for player in state.players:
             rack_ids = ",".join(str(uid) for uid in sorted(t.uid for t in player.rack))
@@ -514,6 +600,11 @@ class StrategicBot:
         )
 
     def _evaluate_state(self, state: GameState, root_idx: int) -> float:
+        """
+        Puntuación del estado para root_idx: menor puntuación en mano propia es mejor,
+        más puntuación en mano rival es peor; bonus por haber abierto y por tablero denso.
+        En fairplay opp_points no se usa (solo opp_count desde opponent_rack_counts).
+        """
         root = state.players[root_idx]
         if not root.rack:
             return 1e6
@@ -522,11 +613,19 @@ class StrategicBot:
         own_count = len(root.rack)
         opp_points = 0.0
         opp_count = 0.0
-        for i, player in enumerate(state.players):
-            if i == root_idx:
-                continue
-            opp_points += sum(t.points() for t in player.rack)
-            opp_count += len(player.rack)
+        if state.opponent_rack_counts is not None:
+            # Fairplay: solo número de fichas por rival, no sus valores.
+            for i in range(len(state.players)):
+                if i == root_idx:
+                    continue
+                if i < len(state.opponent_rack_counts):
+                    opp_count += state.opponent_rack_counts[i]
+        else:
+            for i, player in enumerate(state.players):
+                if i == root_idx:
+                    continue
+                opp_points += sum(t.points() for t in player.rack)
+                opp_count += len(player.rack)
         opp_n = max(1.0, float(len(state.players) - 1))
         avg_opp_points = opp_points / opp_n
         avg_opp_count = opp_count / opp_n
@@ -543,6 +642,11 @@ class StrategicBot:
         )
 
     def _evaluate_used_tiles(self, rack: list[Tile], used: list[Tile], opening: bool) -> float:
+        """
+        Puntuación heurística de una jugada: puntos jugados, número de fichas usadas,
+        penalización por dejar muchas en mano; bonus por vaciar mano y por usar muchas fichas.
+        Comodines penalizados en jugadas no de apertura.
+        """
         joker_used = sum(1 for t in used if t.is_joker)
         played_points = sum(t.points() for t in used)
         used_count = len(used)
@@ -553,7 +657,7 @@ class StrategicBot:
         score -= joker_used * (0.0 if opening else 1.5)
         if not remaining:
             score += 1000.0
-        # Bonus por usar más fichas: ayuda a vaciar la mano más rápido.
+        # Bonus por usar muchas fichas: acerca a vaciar la mano.
         if used_count >= 5:
             score += 3.0
         if used_count >= 7:
@@ -561,13 +665,18 @@ class StrategicBot:
         return score
 
     def _select_option(self, options: list[ScoredMove]) -> ScoredMove:
+        """
+        Elige una opción entre las puntuadas: no siempre la mejor. Con cierta
+        probabilidad se elige una de la mitad inferior (blunder); si no, muestreo
+        por temperatura sobre los scores para variación controlada.
+        """
         if len(options) == 1:
             return options[0]
 
         skill = self.config.skill()
         randomness = min(1.0, max(0.0, self.config.randomness))
         effective_noise = min(1.0, randomness + (1.0 - skill) * 0.65)
-        # Niveles bajos blandean más; niveles altos casi siempre eligen entre las mejores.
+        # Probabilidad de "blunder": niveles bajos más alta.
         blunder_base = 0.08 if skill >= 0.5 else (0.25 - skill * 0.4)
         blunder_prob = min(0.92, blunder_base + (1.0 - skill) * 0.55 + randomness * 0.15)
 

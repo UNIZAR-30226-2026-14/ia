@@ -98,7 +98,7 @@ function applyPreset(name) {
 
 function getTileClass(tile) {
   if (tile === "J*") return "tile-joker";
-  const colorTag = tile.slice(-1);
+  const colorTag = tile.slice(0, 1);
   if (colorTag === "K") return "tile-black";
   if (colorTag === "B") return "tile-blue";
   if (colorTag === "R") return "tile-red";
@@ -108,8 +108,8 @@ function getTileClass(tile) {
 
 function parseTileParts(tile) {
   if (tile === "J*") return { value: "J", suit: "*", colorClass: "tile-joker" };
-  const value = tile.slice(0, 2);
-  const suit = tile.slice(-1);
+  const suit = tile.slice(0, 1);
+  const value = tile.slice(1, 3);
   return { value, suit, colorClass: getTileClass(tile) };
 }
 
@@ -144,13 +144,13 @@ function parseMeldText(raw) {
 
 function tileValue(tile) {
   if (tile === "J*") return null;
-  const n = parseInt(tile.slice(0, 2), 10);
+  const n = parseInt(tile.slice(1, 3), 10);
   return Number.isNaN(n) ? null : n;
 }
 
 function tileColor(tile) {
   if (tile === "J*") return null;
-  return tile.slice(-1);
+  return tile.slice(0, 1);
 }
 
 function isGroupMeld(meld) {
@@ -367,7 +367,7 @@ function renderPool(turn) {
     entries.forEach(([tile, count]) => {
       if (tile === "J*") bySuit["J*"] = count;
       else if (tile.length >= 1) {
-        const suit = tile.slice(-1);
+        const suit = tile.slice(0, 1);
         if (bySuit[suit] !== undefined) bySuit[suit] += count;
       }
     });

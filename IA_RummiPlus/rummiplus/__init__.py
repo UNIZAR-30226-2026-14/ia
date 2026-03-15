@@ -1,6 +1,13 @@
-"""RummiPlus: motor básico y bots de Rummikub clásico."""
+"""
+RummiPlus: motor y bots de Rummikub clásico.
 
-from .api import BotConfig, BotFacade
+Expone la API pública (BotConfig, BotFacade, make_fairplay_view, move_to_dict,
+state_from_bot_request), tipos de datos (GameState, Move, Tile, ...) y el motor
+de simulación (SimulationConfig, run_simulation). El bot es heurístico con
+búsqueda minimax acotada; ver rummiplus.ai para detalles.
+"""
+
+from .api import BotConfig, BotFacade, ViewMode, make_fairplay_view, move_to_dict, state_from_bot_request
 from .core import (
     Board,
     Color,
@@ -17,6 +24,10 @@ from .engine import SimulationConfig, run_simulation
 __all__ = [
     "BotConfig",
     "BotFacade",
+    "ViewMode",
+    "make_fairplay_view",
+    "move_to_dict",
+    "state_from_bot_request",
     "Board",
     "Color",
     "GameState",

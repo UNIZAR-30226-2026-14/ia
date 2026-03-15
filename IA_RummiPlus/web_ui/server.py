@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from rummiplus import BotConfig, BotFacade, Board, GameState, Move, MoveType, PlayerState, build_classic_deck
+from rummiplus import move_to_dict, state_from_bot_request, ViewMode
 from rummiplus.move_logic import apply_move_inplace
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -83,8 +84,8 @@ def _snapshot(state: GameState, turn: int, player_idx: int, move: Move, detail: 
             pool_counts.items(),
             key=lambda kv: (
                 kv[0] == "J*",
-                kv[0][-1] if kv[0] != "J*" else "Z",
-                int(kv[0][:2]) if kv[0] != "J*" else 99,
+                kv[0][0] if kv[0] != "J*" else "Z",
+                int(kv[0][1:3]) if kv[0] != "J*" else 99,
             ),
         )
     )
@@ -107,7 +108,13 @@ def _snapshot(state: GameState, turn: int, player_idx: int, move: Move, detail: 
     )
 
 
-def run_visual_simulation(levels: list[int], randomness: float, seed: int, max_turns: int) -> dict[str, Any]:
+def run_visual_simulation(
+    levels: list[int],
+    randomness: float,
+    seed: int,
+    max_turns: int,
+    view_mode: ViewMode = ViewMode.FAIRPLAY,
+) -> dict[str, Any]:
     state, bots = _init_state(levels, randomness, seed)
     timeline: list[dict[str, Any]] = []
 
@@ -119,7 +126,10 @@ def run_visual_simulation(levels: list[int], randomness: float, seed: int, max_t
         player_idx = state.current_player_idx
         player = state.players[player_idx]
         bot = bots[player_idx]
-        move = bot.decide_turn(state, player_idx)
+        if view_mode == ViewMode.FAIRPLAY:
+            move = bot.decide_turn_fairplay(state, player_idx)
+        else:
+            move = bot.decide_turn(state, player_idx)
         ok, detail = apply_move_inplace(state, player_idx, move, draw_on_pass=True)
         if not ok:
             _, penalty_detail = apply_move_inplace(
@@ -169,7 +179,39 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
         return super().do_GET()
 
+    def _handle_bot_move(self) -> None:
+        """POST /api/bot/move: estado en JSON → jugada en JSON. Para Spring Boot."""
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._json_response({"error": "JSON inválido"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            state = state_from_bot_request(payload)
+            level = max(1, min(10, int(payload.get("level", 5))))
+            randomness = max(0.0, min(1.0, float(payload.get("randomness", 0.25))))
+            seed = payload.get("seed")
+            if seed is not None:
+                seed = int(seed)
+            bot = BotFacade(BotConfig(level=level, randomness=randomness, seed=seed))
+            move = bot.decide_turn(state, 0)
+            self._json_response({
+                "move": move_to_dict(move),
+                "move_short": move.short(),
+            })
+        except ValueError as e:
+            self._json_response({"error": str(e)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._json_response({"error": str(e)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
     def do_POST(self) -> None:
+        if self.path == "/api/bot/move":
+            self._handle_bot_move()
+            return
         if self.path not in ["/api/run", "/api/run_simulation"]:
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
@@ -186,6 +228,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         randomness = float(payload.get("randomness", 0.25))
         seed = int(payload.get("seed", 1234))
         max_turns = int(payload.get("max_turns", 300))
+        view_mode_str = (payload.get("view_mode") or "fairplay").lower()
+        view_mode = ViewMode.SIMULATION if view_mode_str == "simulation" else ViewMode.FAIRPLAY
         if not isinstance(levels, list) or not levels:
             self._json_response({"error": "levels debe ser una lista"}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -202,6 +246,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 randomness=max(0.0, min(1.0, randomness)),
                 seed=seed,
                 max_turns=max(1, max_turns),
+                view_mode=view_mode,
             )
             self._json_response(data)
         except Exception as e:

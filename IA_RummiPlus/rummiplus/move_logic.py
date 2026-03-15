@@ -1,3 +1,11 @@
+"""
+Lógica de jugadas: validación, clonado de estado y aplicación en sitio.
+
+Valida que una Move sea legal (fichas del rack, melds válidos, apertura ≥30),
+clona GameState para búsqueda y aplica la jugada modificando el estado in-place
+(quitar fichas del rack, añadir al tablero, robar de la bolsa al pasar).
+"""
+
 from __future__ import annotations
 
 from .core import GameState, Meld, Move, MoveType, PlayerState
@@ -7,11 +15,17 @@ OPENING_MIN_POINTS = 30
 
 
 def opening_points(melds: list[Meld]) -> int:
-    # Regla clásica: para apertura contamos solo fichas no comodín.
+    """
+    Puntos que cuentan para la apertura: solo fichas no comodín (regla clásica).
+    """
     return sum(t.points() for meld in melds for t in meld.tiles if not t.is_joker)
 
 
 def clone_state(state: GameState) -> GameState:
+    """
+    Copia profunda del estado (tablero, jugadores, bolsa, turno).
+    Necesario para simular jugadas en la búsqueda sin alterar el estado real.
+    """
     return GameState(
         board=state.board.clone(),
         players=[
@@ -21,10 +35,16 @@ def clone_state(state: GameState) -> GameState:
         pool=list(state.pool),
         current_player_idx=state.current_player_idx,
         turn_number=state.turn_number,
+        opponent_rack_counts=list(state.opponent_rack_counts) if state.opponent_rack_counts is not None else None,
     )
 
 
 def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, str]:
+    """
+    Comprueba si la jugada es legal: fichas en el rack, melds válidos, apertura
+    ≥30 si aplica, extensión/reorganización coherente. Devuelve (True, detalle)
+    o (False, mensaje de error).
+    """
     player = state.players[player_idx]
 
     if move.move_type == MoveType.PASS_TURN:
@@ -101,6 +121,7 @@ def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, 
 
 
 def _draw_tile(state: GameState, player: PlayerState) -> str:
+    """Roba una ficha de la bolsa y la añade al rack del jugador. Devuelve mensaje."""
     if not state.pool:
         return "sin fichas para robar"
     tile = state.pool.pop()
@@ -111,6 +132,11 @@ def _draw_tile(state: GameState, player: PlayerState) -> str:
 def apply_move_inplace(
     state: GameState, player_idx: int, move: Move, draw_on_pass: bool = True
 ) -> tuple[bool, str]:
+    """
+    Valida la jugada y, si es legal, la aplica modificando state in-place:
+    quitar fichas del rack, actualizar tablero, opcionalmente robar al pasar.
+    Devuelve (True, detalle) o (False, motivo).
+    """
     ok, reason = validate_move(state, player_idx, move)
     if not ok:
         return False, reason

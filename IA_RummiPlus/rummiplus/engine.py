@@ -1,9 +1,18 @@
+"""
+Motor de simulación de partidas entre bots (sin UI).
+
+Inicializa estado y bots a partir de SimulationConfig, ejecuta turnos en bucle:
+cada turno el bot correspondiente decide (fairplay o simulación según view_mode),
+se aplica la jugada y se rota el turno hasta que alguien vacíe la mano o se
+alcance max_turns. Opcionalmente registra logs por turno.
+"""
+
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
 
-from .api import BotConfig, BotFacade
+from .api import BotConfig, BotFacade, ViewMode
 from .core import Board, GameState, Move, MoveType, PlayerState, build_classic_deck
 from .move_logic import apply_move_inplace
 
@@ -14,10 +23,13 @@ class SimulationConfig:
     seed: int | None = None
     max_turns: int = 120
     initial_rack_size: int = 14
+    view_mode: ViewMode = ViewMode.FAIRPLAY
+    """FAIRPLAY: cada bot solo ve tablero, bolsa y sus fichas. SIMULATION: estado completo."""
 
 
 @dataclass
 class SimulationResult:
+    """Resultado de una partida: ganador (o None), turnos jugados, logs y puntos por jugador."""
     winner_id: str | None
     turns_played: int
     logs: list[str] = field(default_factory=list)
@@ -25,6 +37,10 @@ class SimulationResult:
 
 
 def _init_state(cfg: SimulationConfig) -> tuple[GameState, list[BotFacade]]:
+    """
+    Crea el mazo, lo baraja, reparte initial_rack_size fichas por bot y devuelve
+    el estado inicial y la lista de BotFacade (uno por bot_configs).
+    """
     rng = random.Random(cfg.seed)
     deck = build_classic_deck()
     rng.shuffle(deck)
@@ -41,6 +57,12 @@ def _init_state(cfg: SimulationConfig) -> tuple[GameState, list[BotFacade]]:
 
 
 def run_simulation(cfg: SimulationConfig) -> SimulationResult:
+    """
+    Ejecuta una partida completa: en cada turno el bot correspondiente elige
+    jugada (fairplay o simulación según cfg.view_mode), se aplica y se pasa al
+    siguiente. Si la jugada es ilegal se penaliza con robo. Devuelve ganador,
+    número de turnos, logs y puntos finales por jugador.
+    """
     state, bots = _init_state(cfg)
     logs: list[str] = []
 
@@ -48,12 +70,15 @@ def run_simulation(cfg: SimulationConfig) -> SimulationResult:
     for turn in range(1, cfg.max_turns + 1):
         state.turn_number = turn
         bot = bots[state.current_player_idx]
-        move = bot.decide_turn(state, state.current_player_idx)
+        if cfg.view_mode == ViewMode.FAIRPLAY:
+            move = bot.decide_turn_fairplay(state, state.current_player_idx)
+        else:
+            move = bot.decide_turn(state, state.current_player_idx)
         ok, detail = apply_move_inplace(
             state, state.current_player_idx, move, draw_on_pass=True
         )
         if not ok:
-            # Si el bot propone algo ilegal, penalizamos con robo.
+            # Jugada ilegal: forzar pasar y robar como penalización.
             _, penalty = apply_move_inplace(
                 state,
                 state.current_player_idx,
