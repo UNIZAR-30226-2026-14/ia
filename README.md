@@ -2,6 +2,8 @@
 
 Bot de Rummikub clásico expuesto por HTTP para integrar en **Spring Boot**. El backend gestiona la partida (web, cliente de escritorio, etc.); en el turno del bot llama a esta API y recibe la jugada en JSON.
 
+**Atención: El presente README y la mayoría de documentación de este repositorio ha sido creado mediante uso de LLM.**
+
 ---
 
 ## Índice
