@@ -36,7 +36,18 @@ import random
 import time
 from dataclasses import dataclass
 
-from .core import GameState, Meld, Move, MoveType, PlayerState, Tile
+from .core import (
+    GameState,
+    ItemType,
+    ItemUse,
+    Meld,
+    Move,
+    MoveType,
+    PlayerState,
+    ShopChoice,
+    ShopOffer,
+    Tile,
+)
 from .move_logic import apply_move_inplace, clone_state, opening_points, validate_move
 from .rules import (
     extend_meld_with_tile,
@@ -91,15 +102,86 @@ class StrategicBot:
     def choose_move(self, state: GameState, player_idx: int) -> Move:
         """
         Decide la jugada para el jugador player_idx dado el estado.
-        Genera opciones legales, las re-puntúa con búsqueda si level≥3 y elige una.
+
+        Flujo (modo arcade en dos fases):
+          1. Calcula una jugada candidata con el estado recibido (genera,
+             puntúa con búsqueda si level≥3 y selecciona una).
+          2. Evalúa si conviene usar un objeto antes de ejecutar la jugada.
+             Si sí (y el objeto no está ya en arcade.items_used_this_turn),
+             devuelve un Move(move_type=USE_ITEM, item_use=...) SIN jugada.
+             El backend debe ejecutar el efecto, añadir el objeto a
+             items_used_this_turn y volver a llamar a /api/bot/move para que
+             el bot decida la siguiente fase (otro objeto o la jugada final).
+          3. Si no hay objeto que sugerir, devuelve la jugada calculada. En
+             esa misma respuesta se adjunta opcionalmente shop_choice si el
+             request incluyó arcade.shop.offer.
+
+        El bucle termina cuando el bot deja de devolver USE_ITEM: el filtro
+        por items_used_this_turn garantiza progreso (cada objeto solo se
+        puede sugerir una vez por turno).
         """
         options = self._generate_options(state, player_idx)
         if not options:
-            return Move(move_type=MoveType.PASS_TURN, reason="sin opciones legales")
+            chosen = Move(move_type=MoveType.PASS_TURN, reason="sin opciones legales")
+        else:
+            if self.config.level >= 3 and len(options) > 1:
+                options = self._score_with_search(state, player_idx, options)
+            chosen = self._select_option(options).move
 
-        if self.config.level >= 3 and len(options) > 1:
-            options = self._score_with_search(state, player_idx, options)
-        return self._select_option(options).move
+        item_use = self._suggest_item_use(state, player_idx, chosen)
+        if item_use is not None:
+            return Move(
+                move_type=MoveType.USE_ITEM,
+                item_use=item_use,
+                reason=f"usar {item_use.item.value} antes de jugar",
+            )
+
+        chosen.shop_choice = self._suggest_shop_choice(state, player_idx)
+        return chosen
+
+    def _suggest_shop_choice(
+        self, state: GameState, player_idx: int
+    ) -> ShopChoice | None:
+        """
+        Si el estado arcade trae oferta de tienda, delega en choose_shop_item
+        con el contexto del propio GameState (saldo, inventario, mano, rivales).
+        Devuelve None si no hay tienda abierta este turno.
+        """
+        arcade = state.arcade
+        if arcade is None or not arcade.enabled:
+            return None
+        if not arcade.shop_offer:
+            return None
+        player = state.players[player_idx]
+        opponent_rack_counts: list[int] = []
+        if state.opponent_rack_counts:
+            opponent_rack_counts = [
+                c for i, c in enumerate(state.opponent_rack_counts) if i != player_idx
+            ]
+        return self.choose_shop_item(
+            offer=list(arcade.shop_offer),
+            balance=arcade.shop_balance,
+            current_items=list(arcade.my_items),
+            opponent_rack_counts=opponent_rack_counts,
+            my_tiles_count=len(player.rack),
+            my_opened=player.opened,
+            guardian_angel_active=arcade.guardian_angel_active,
+        )
+
+    def _arcade_rack(self, state: GameState, player_idx: int) -> list[Tile]:
+        """
+        Rack efectivo para generación de jugadas en modo arcade: si hay un
+        color bloqueado por evento de ronda, se excluyen las fichas de ese
+        color. Las fichas con habilidad arcoíris (t.rainbow = True) actúan
+        como color flexible y **nunca** se filtran aunque su color base
+        coincida con el bloqueado. En modo normal devuelve el rack tal cual.
+        """
+        rack = state.players[player_idx].rack
+        arcade = state.arcade
+        if arcade is None or not arcade.enabled or arcade.blocked_color is None:
+            return rack
+        blocked = arcade.blocked_color
+        return [t for t in rack if t.rainbow or t.color != blocked]
 
     def _effective_limits(self) -> tuple[int, int, int]:
         """
@@ -117,10 +199,15 @@ class StrategicBot:
         Genera candidatos de jugada: aperturas ≥30, melds nuevos, extensiones,
         reorganizaciones de tablero y pasar. Cada uno se puntúa con heurística.
         Al final se filtran solo las legales y se recorta por max_regular/max_open.
+
+        En modo arcade, si hay color bloqueado por evento de ronda, las fichas
+        de ese color se excluyen del rack efectivo (no se proponen para ningún
+        tipo de jugada). Las restricciones adicionales (techo de cristal) las
+        aplica validate_move en el filtrado de legalidad.
         """
         player = state.players[player_idx]
         options: list[ScoredMove] = []
-        rack = player.rack
+        rack = self._arcade_rack(state, player_idx)
         max_open, max_regular, replace_max = self._effective_limits()
 
         # --- Fase de apertura: combinaciones que sumen ≥30 puntos ---
@@ -663,6 +750,289 @@ class StrategicBot:
         if used_count >= 7:
             score += 5.0
         return score
+
+    def _suggest_item_use(
+        self, state: GameState, player_idx: int, chosen: Move
+    ) -> ItemUse | None:
+        """
+        Heurística conservadora para sugerir el uso de un objeto arcade antes
+        de aplicar la jugada (solo si el modo arcade está activo y el bot
+        tiene objetos aún no usados este turno). Devuelve un ItemUse o None.
+
+        Los objetos que ya figuran en arcade.items_used_this_turn se filtran
+        aquí: si un objeto fue usado o denegado en una fase anterior del
+        turno, no se vuelve a sugerir. Esto garantiza que el bucle de
+        USE_ITEM entre bot y backend termine siempre en un número finito de
+        llamadas (como mucho, len(my_items) + 1).
+
+        Prioridades (de más a menos fuerte):
+          1. Frenar a un rival a punto de ganar (pocas fichas): +4, Techo de
+             cristal, Guindilla.
+          2. Con mano grande y aún sin abrir: Toque de Midas / Refracción
+             multicolor (mejoran puntuación y flexibilidad de la propia mano).
+          3. Robar objeto a un rival que tenga inventario: Guante blanco.
+          4. Sembrar confusión si se va a reorganizar el tablero: Bomba de humo.
+          5. Comodín de información para niveles altos: Bola de cristal / Lupa.
+        Ángel de la guarda es pasivo y nunca se sugiere activamente. Poder del -
+        no se sugiere: perjudica al propio bot.
+        """
+        arcade = state.arcade
+        if arcade is None or not arcade.enabled:
+            return None
+        used = set(arcade.items_used_this_turn)
+        items = [it for it in arcade.my_items if it not in used]
+        if not items:
+            return None
+
+        rivals = [i for i in range(len(state.players)) if i != player_idx]
+        opp_counts = state.opponent_rack_counts or []
+        rival_counts: list[tuple[int, int]] = []
+        for i in rivals:
+            if i < len(opp_counts):
+                rival_counts.append((i, opp_counts[i]))
+        leading_rival: tuple[int, int] | None = None
+        if rival_counts:
+            leading_rival = min(rival_counts, key=lambda x: x[1])
+
+        # 1) Rival a punto de ganar: debuffs agresivos.
+        if leading_rival is not None and leading_rival[1] <= 3:
+            target = leading_rival[0]
+            if ItemType.PLUS_FOUR in items:
+                return ItemUse(
+                    item=ItemType.PLUS_FOUR,
+                    target_player_idx=target,
+                    reason="oponente cerca de ganar: forzar robo de 4",
+                )
+            if ItemType.GLASS_CEILING in items:
+                return ItemUse(
+                    item=ItemType.GLASS_CEILING,
+                    target_player_idx=target,
+                    reason="imponer mínimo 30 al rival líder",
+                )
+            if ItemType.CHILI_PEPPER in items:
+                return ItemUse(
+                    item=ItemType.CHILI_PEPPER,
+                    target_player_idx=target,
+                    reason="reducir tiempo al rival líder",
+                )
+            if ItemType.SWAP_ON_FAIL in items:
+                return ItemUse(
+                    item=ItemType.SWAP_ON_FAIL,
+                    target_player_idx=target,
+                    reason="intercambio ventajoso con rival líder",
+                )
+            if ItemType.RUM_ROCKS in items:
+                return ItemUse(
+                    item=ItemType.RUM_ROCKS,
+                    target_player_idx=target,
+                    reason="invertir controles al rival líder",
+                )
+
+        # 2) Mano grande sin abrir: buffs a uno mismo.
+        my_rack = state.players[player_idx].rack
+        if len(my_rack) >= 12 and not state.players[player_idx].opened:
+            if ItemType.MIDAS_TOUCH in items:
+                return ItemUse(
+                    item=ItemType.MIDAS_TOUCH,
+                    target_player_idx=None,
+                    reason="mano grande: subir puntuación con fichas doradas",
+                )
+            if ItemType.RAINBOW_REFRACTION in items:
+                return ItemUse(
+                    item=ItemType.RAINBOW_REFRACTION,
+                    target_player_idx=None,
+                    reason="mano grande: flexibilizar colores",
+                )
+
+        # 3) Robar objeto a rival con inventario.
+        if ItemType.WHITE_GLOVE in items and arcade.opponent_item_counts:
+            rivals_with_items: list[tuple[int, int]] = []
+            for i in rivals:
+                if i < len(arcade.opponent_item_counts) and arcade.opponent_item_counts[i] > 0:
+                    rivals_with_items.append((i, arcade.opponent_item_counts[i]))
+            if rivals_with_items:
+                target, _ = max(rivals_with_items, key=lambda x: x[1])
+                return ItemUse(
+                    item=ItemType.WHITE_GLOVE,
+                    target_player_idx=target,
+                    reason="robar objeto a rival con inventario",
+                )
+
+        # 4) Bomba de humo si se va a reorganizar el tablero (más difícil de leer).
+        if (
+            ItemType.SMOKE_BOMB in items
+            and chosen.move_type == MoveType.REPLACE_BOARD
+            and leading_rival is not None
+        ):
+            return ItemUse(
+                item=ItemType.SMOKE_BOMB,
+                target_player_idx=leading_rival[0],
+                reason="reorganización: ocultar tablero al rival líder",
+            )
+
+        # 5) Objetos de información para niveles altos (8+).
+        if self.config.level >= 8 and leading_rival is not None:
+            if ItemType.TRUTH_MAGNIFIER in items:
+                return ItemUse(
+                    item=ItemType.TRUTH_MAGNIFIER,
+                    target_player_idx=leading_rival[0],
+                    reason="inspeccionar rival líder",
+                )
+            if ItemType.CRYSTAL_BALL in items:
+                return ItemUse(
+                    item=ItemType.CRYSTAL_BALL,
+                    target_player_idx=None,
+                    reason="consulta global de color/rango",
+                    params={"color": "B", "value_range": [1, 13]},
+                )
+
+        return None
+
+    def choose_shop_item(
+        self,
+        offer: list[ShopOffer],
+        balance: int,
+        current_items: list[ItemType],
+        opponent_rack_counts: list[int],
+        my_tiles_count: int,
+        my_opened: bool,
+        guardian_angel_active: bool = False,
+    ) -> ShopChoice:
+        """
+        Decide si comprar uno de los objetos ofrecidos por la tienda arcade.
+
+        El backend compone el surtido (2–3 ofertas) y pasa saldo, inventario
+        actual del bot y contexto mínimo de la partida. El bot valora cada
+        oferta con una utilidad heurística (por tipo de objeto y contexto) y
+        elige la mejor relación utilidad/precio. Si ninguna supera el umbral
+        mínimo de utilidad o el inventario está lleno, devuelve ShopChoice(None).
+
+        Reglas duras:
+          - Si el inventario ya tiene 3 objetos, no compra.
+          - Ignora ofertas con precio > saldo.
+          - Deduplicados por ItemType: si dos ofertas son iguales se elige la
+            más barata.
+          - GUARDIAN_ANGEL no se compra si ya hay escudo activo
+            (guardian_angel_active=True) o si ya hay un Ángel pendiente de
+            convertir en current_items: sería redundante por la regla de
+            "no acumulable" (ver README 1.10.4 y 1.10.9.4).
+        """
+        if len(current_items) >= 3:
+            return ShopChoice(buy=None, reason="inventario lleno (3/3)")
+        affordable = [o for o in offer if o.price <= balance]
+        if not affordable:
+            return ShopChoice(buy=None, reason="sin saldo suficiente")
+
+        # Deduplicar por ItemType (nos quedamos con la más barata).
+        best_by_item: dict[ItemType, ShopOffer] = {}
+        for o in affordable:
+            prev = best_by_item.get(o.item)
+            if prev is None or o.price < prev.price:
+                best_by_item[o.item] = o
+        candidates = list(best_by_item.values())
+
+        # Regla dura: GUARDIAN_ANGEL no se compra redundantemente.
+        if guardian_angel_active or ItemType.GUARDIAN_ANGEL in current_items:
+            candidates = [c for c in candidates if c.item != ItemType.GUARDIAN_ANGEL]
+            if not candidates:
+                return ShopChoice(
+                    buy=None,
+                    reason="único candidato era Ángel y ya hay protección",
+                )
+
+        leading_opp: int | None = None
+        if opponent_rack_counts:
+            leading_opp = min(opponent_rack_counts)
+
+        ranked: list[tuple[float, ShopOffer, str]] = []
+        for o in candidates:
+            utility, reason = self._shop_item_utility(
+                o.item,
+                current_items=current_items,
+                leading_opp=leading_opp,
+                my_tiles_count=my_tiles_count,
+                my_opened=my_opened,
+                guardian_angel_active=guardian_angel_active,
+            )
+            # Relación utilidad / precio (evita divisiones por 0 si price<=0).
+            ratio = utility / max(1, o.price)
+            ranked.append((ratio, o, reason))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        top_ratio, top_offer, top_reason = ranked[0]
+
+        # Umbral mínimo: evitar compras pobres por inercia.
+        MIN_RATIO = 0.02
+        if top_ratio <= MIN_RATIO:
+            return ShopChoice(
+                buy=None,
+                reason=f"ninguna oferta compensa (mejor ratio={top_ratio:.3f})",
+            )
+        return ShopChoice(buy=top_offer.item, reason=top_reason)
+
+    def _shop_item_utility(
+        self,
+        item: ItemType,
+        current_items: list[ItemType],
+        leading_opp: int | None,
+        my_tiles_count: int,
+        my_opened: bool,
+        guardian_angel_active: bool = False,
+    ) -> tuple[float, str]:
+        """
+        Calcula una utilidad abstracta (positivo = interesa) para un objeto
+        dado el contexto del bot. Utilidad 0 o negativa => desaconsejado.
+        No intenta ser un precio real; lo importante es la comparación relativa.
+        """
+        # Defensas pasivas
+        if item == ItemType.GUARDIAN_ANGEL:
+            # No acumulable: si ya hay escudo o un Ángel pendiente, utilidad nula.
+            if guardian_angel_active or ItemType.GUARDIAN_ANGEL in current_items:
+                return 0.0, "ya hay protección activa o pendiente"
+            # Si no, vale más cuanto mayor sea el inventario que merezca proteger.
+            base = 3.0 + 1.5 * len(current_items)
+            return base, "proteger inventario con Ángel de la guarda"
+
+        # Debuffs contra rival líder
+        if leading_opp is not None and leading_opp <= 5:
+            if item == ItemType.PLUS_FOUR:
+                return 8.0, "rival cerca de ganar: +4 es muy útil"
+            if item == ItemType.GLASS_CEILING:
+                return 7.0, "rival cerca de ganar: techo de cristal"
+            if item == ItemType.CHILI_PEPPER:
+                return 5.5, "rival cerca de ganar: reducir su tiempo"
+            if item == ItemType.SWAP_ON_FAIL:
+                return 5.0, "intercambio ventajoso con rival líder"
+            if item == ItemType.RUM_ROCKS:
+                return 4.5, "invertir controles al rival líder"
+            if item == ItemType.SMOKE_BOMB:
+                return 3.5, "ocultar tablero al rival líder"
+
+        # Buffs personales si la mano pesa o aún no se ha abierto
+        if my_tiles_count >= 12 or not my_opened:
+            if item == ItemType.MIDAS_TOUCH:
+                return 6.0, "mano grande: fichas doradas ayudan a abrir"
+            if item == ItemType.RAINBOW_REFRACTION:
+                return 5.0, "mano grande: arcoíris flexibiliza colores"
+
+        # Información (valor solo en niveles altos)
+        if self.config.level >= 7:
+            if item == ItemType.TRUTH_MAGNIFIER:
+                return 3.0, "información sobre rival (nivel alto)"
+            if item == ItemType.CRYSTAL_BALL:
+                return 2.5, "información global (nivel alto)"
+
+        # Guante blanco: solo útil si los rivales tienen objetos
+        if item == ItemType.WHITE_GLOVE:
+            # Sin información explícita en este endpoint: valor bajo-moderado.
+            return 2.0, "posibilidad de robar objeto a un rival"
+
+        # Nunca compramos MINUS_POWER (se perjudica uno mismo)
+        if item == ItemType.MINUS_POWER:
+            return -10.0, "Poder del − perjudica al propio bot"
+
+        # Utilidad residual por defecto
+        return 1.0, "utilidad genérica baja"
 
     def _select_option(self, options: list[ScoredMove]) -> ScoredMove:
         """

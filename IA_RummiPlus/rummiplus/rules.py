@@ -5,6 +5,10 @@ Un meld es válido si es grupo (mismo valor, colores distintos, 3-4 fichas) o
 escalera (mismo color, valores consecutivos, 3+ fichas). Los comodines pueden
 sustituir cualquier ficha. Proporciona generación de melds desde un rack,
 combinaciones de apertura (≥30 puntos) y extensión de melds existentes.
+
+En modo arcade admite fichas con la habilidad arcoíris (Tile.rainbow = True)
+como color flexible: en un grupo ocupan cualquier color no repetido y en una
+escalera se comportan como el color dominante del resto de fichas no arcoíris.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Iterable
 
-from .core import Color, Meld, Tile
+from .core import Meld, NATURAL_COLORS, Tile
 
 
 def is_valid_meld(tiles: list[Tile]) -> bool:
@@ -24,6 +28,9 @@ def is_valid_set(tiles: list[Tile]) -> bool:
     """
     Comprueba si las fichas forman un grupo válido: mismo valor numérico,
     colores distintos entre las naturales, 3 o 4 fichas (comodines permitidos).
+    En modo arcade, las fichas con la habilidad arcoíris (t.rainbow = True)
+    ocupan un slot de color libre (sin repetir); tanto los comodines como las
+    arcoíris consumen slots de color disponibles (máx. 4 colores distintos).
     """
     n = len(tiles)
     if n < 3 or n > 4:
@@ -34,14 +41,23 @@ def is_valid_set(tiles: list[Tile]) -> bool:
     if not naturals:
         return False
 
-    # Grupo: un solo valor entre las naturales
+    # Grupo: un solo valor entre las naturales (las arcoíris también tienen valor fijo).
     values = {t.value for t in naturals}
     if len(values) != 1:
         return False
 
-    # Colores distintos (sin repetir color en naturales)
-    colors = [t.color for t in naturals]
-    if len(set(colors)) != len(colors):
+    # Separar naturales "clásicas" de arcoíris: solo las primeras fijan un color.
+    non_rainbow = [t for t in naturals if not t.rainbow]
+    rainbow_count = len(naturals) - len(non_rainbow)
+
+    fixed_colors = [t.color for t in non_rainbow]
+    if len(set(fixed_colors)) != len(fixed_colors):
+        return False
+
+    # Comodines y arcoíris necesitan cada uno un color libre (K/B/O/R no usado).
+    available_slots = len(NATURAL_COLORS) - len(set(fixed_colors))
+    flex_needed = rainbow_count + len(jokers)
+    if flex_needed > available_slots:
         return False
 
     return len(naturals) + len(jokers) == n
@@ -53,6 +69,11 @@ def is_valid_run(tiles: list[Tile]) -> bool:
     valores consecutivos (los huecos pueden ser comodines), mínimo 3 fichas.
     Recorre los posibles intervalos [start, start+n) en 1..13 y comprueba si
     los valores naturales caben y los huecos se cubren con comodines.
+
+    En modo arcade, las fichas con la habilidad arcoíris (t.rainbow = True)
+    actúan como el color dominante de la escalera (el del resto de naturales
+    sin arcoíris), manteniendo su valor. Si todas las naturales son arcoíris,
+    cualquier color es válido.
     """
     n = len(tiles)
     if n < 3:
@@ -63,16 +84,18 @@ def is_valid_run(tiles: list[Tile]) -> bool:
     if not naturals:
         return False
 
-    # Una sola color en naturales
-    colors = {t.color for t in naturals}
-    if len(colors) != 1 or None in colors:
-        return False
+    # Color dominante: el común entre naturales que NO son arcoíris.
+    non_rainbow = [t for t in naturals if not t.rainbow]
+    if non_rainbow:
+        colors = {t.color for t in non_rainbow}
+        if len(colors) != 1 or None in colors:
+            return False
 
     values = [t.value for t in naturals if t.value is not None]
     if len(values) != len(set(values)):
         return False
 
-    # Rango de inicios posibles para una ventana de longitud n
+    # Rango de inicios posibles para una ventana de longitud n.
     min_start = max(1, max(values) - n + 1)
     max_start = min(min(values), 13 - n + 1)
     joker_count = len(jokers)

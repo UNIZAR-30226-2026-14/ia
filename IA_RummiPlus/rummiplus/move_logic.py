@@ -4,11 +4,17 @@ Lógica de jugadas: validación, clonado de estado y aplicación en sitio.
 Valida que una Move sea legal (fichas del rack, melds válidos, apertura ≥30),
 clona GameState para búsqueda y aplica la jugada modificando el estado in-place
 (quitar fichas del rack, añadir al tablero, robar de la bolsa al pasar).
+
+En modo arcade, validate_move respeta también dos restricciones opcionales del
+ArcadeState acompañante: color bloqueado (no se pueden jugar fichas de ese
+color) y techo de cristal (la jugada debe sumar al menos min_play_points).
 """
 
 from __future__ import annotations
 
-from .core import GameState, Meld, Move, MoveType, PlayerState
+from dataclasses import replace
+
+from .core import ArcadeState, GameState, Meld, Move, MoveType, PlayerState, Tile
 from .rules import extend_meld_with_tile, is_valid_meld
 
 OPENING_MIN_POINTS = 30
@@ -17,15 +23,50 @@ OPENING_MIN_POINTS = 30
 def opening_points(melds: list[Meld]) -> int:
     """
     Puntos que cuentan para la apertura: solo fichas no comodín (regla clásica).
+    En modo arcade, las fichas doradas/negativas aportan sus puntos con
+    modificador (t.points() ya incorpora el signo y la duplicación).
     """
     return sum(t.points() for meld in melds for t in meld.tiles if not t.is_joker)
+
+
+def _played_tiles(move: Move, state: GameState, player_idx: int) -> list[Tile]:
+    """
+    Lista de fichas que el jugador añade al tablero en esta jugada (no incluye
+    fichas que ya estaban en el tablero y solo se reorganizan).
+    Usado para aplicar restricciones arcade (color bloqueado, techo de cristal).
+    """
+    if move.move_type == MoveType.PLAY_MELDS:
+        return [t for meld in move.new_melds for t in meld.tiles]
+    if move.move_type == MoveType.EXTEND_MELD:
+        return list(move.extension_tiles)
+    if move.move_type == MoveType.REPLACE_BOARD:
+        board_uids = {t.uid for m in state.board.melds for t in m.tiles}
+        rack_uids = {t.uid for t in state.players[player_idx].rack}
+        rack_by_uid = {t.uid: t for t in state.players[player_idx].rack}
+        played: list[Tile] = []
+        for meld in move.new_board:
+            for t in meld.tiles:
+                if t.uid in rack_uids and t.uid not in board_uids:
+                    played.append(rack_by_uid[t.uid])
+        return played
+    return []
 
 
 def clone_state(state: GameState) -> GameState:
     """
     Copia profunda del estado (tablero, jugadores, bolsa, turno).
     Necesario para simular jugadas en la búsqueda sin alterar el estado real.
+    En modo arcade se copia también el ArcadeState (inventarios y restricciones).
     """
+    arcade_copy: ArcadeState | None = None
+    if state.arcade is not None:
+        arcade_copy = replace(
+            state.arcade,
+            my_items=list(state.arcade.my_items),
+            opponent_item_counts=list(state.arcade.opponent_item_counts),
+            shop_offer=list(state.arcade.shop_offer),
+            items_used_this_turn=list(state.arcade.items_used_this_turn),
+        )
     return GameState(
         board=state.board.clone(),
         players=[
@@ -36,7 +77,44 @@ def clone_state(state: GameState) -> GameState:
         current_player_idx=state.current_player_idx,
         turn_number=state.turn_number,
         opponent_rack_counts=list(state.opponent_rack_counts) if state.opponent_rack_counts is not None else None,
+        arcade=arcade_copy,
     )
+
+
+def _validate_arcade_constraints(
+    state: GameState, player_idx: int, move: Move
+) -> tuple[bool, str]:
+    """
+    Valida las restricciones del modo arcade sobre una jugada ya legal en el
+    sentido clásico: color bloqueado y techo de cristal (min_play_points).
+    Devuelve (True, '') si no hay violación o no hay ArcadeState activo.
+    PASS_TURN nunca viola estas restricciones.
+    """
+    arcade = state.arcade
+    if arcade is None or not arcade.enabled:
+        return True, ""
+    if move.move_type == MoveType.PASS_TURN:
+        return True, ""
+
+    played = _played_tiles(move, state, player_idx)
+
+    if arcade.blocked_color is not None:
+        for t in played:
+            # Las fichas arcoíris (habilidad 'A') no están ligadas a su color
+            # base: actúan como color flexible y no las afecta el bloqueo.
+            if t.rainbow:
+                continue
+            if t.color == arcade.blocked_color:
+                return False, f"arcade: color bloqueado {arcade.blocked_color.value}"
+
+    if arcade.min_play_points is not None:
+        played_points = sum(t.points() for t in played)
+        if played_points < arcade.min_play_points:
+            return (
+                False,
+                f"arcade: techo de cristal {played_points} < {arcade.min_play_points}",
+            )
+    return True, ""
 
 
 def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, str]:
@@ -44,8 +122,20 @@ def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, 
     Comprueba si la jugada es legal: fichas en el rack, melds válidos, apertura
     ≥30 si aplica, extensión/reorganización coherente. Devuelve (True, detalle)
     o (False, mensaje de error).
+
+    En modo arcade también se comprueban restricciones del ArcadeState
+    acompañante: color bloqueado y techo de cristal (min_play_points).
+
+    El tipo USE_ITEM no es una jugada del motor clásico (solo una señal a
+    nivel de API para que el backend ejecute un objeto y vuelva a preguntar);
+    no se valida ni aplica aquí: validate_move y apply_move_inplace lo
+    rechazan explícitamente. Se emite únicamente como respuesta en
+    choose_move y se serializa en move_to_dict.
     """
     player = state.players[player_idx]
+
+    if move.move_type == MoveType.USE_ITEM:
+        return False, "use_item no es una jugada del motor (solo respuesta de API)"
 
     if move.move_type == MoveType.PASS_TURN:
         return True, "pass legal"
@@ -70,6 +160,9 @@ def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, 
             points = opening_points(move.new_melds)
             if points < OPENING_MIN_POINTS:
                 return False, f"apertura inválida: {points} < {OPENING_MIN_POINTS}"
+        ok_arcade, reason_arcade = _validate_arcade_constraints(state, player_idx, move)
+        if not ok_arcade:
+            return False, reason_arcade
         return True, "play legal"
 
     if move.move_type == MoveType.EXTEND_MELD:
@@ -88,6 +181,9 @@ def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, 
         target = state.board.melds[move.extend_index]
         if extend_meld_with_tile(target, rack_tile) is None:
             return False, "extensión no legal"
+        ok_arcade, reason_arcade = _validate_arcade_constraints(state, player_idx, move)
+        if not ok_arcade:
+            return False, reason_arcade
         return True, "extend legal"
 
     if move.move_type == MoveType.REPLACE_BOARD:
@@ -115,6 +211,9 @@ def validate_move(state: GameState, player_idx: int, move: Move) -> tuple[bool, 
             )
             if points_from_hand < OPENING_MIN_POINTS:
                 return False, f"apertura en reorganización: {points_from_hand} < {OPENING_MIN_POINTS}"
+        ok_arcade, reason_arcade = _validate_arcade_constraints(state, player_idx, move)
+        if not ok_arcade:
+            return False, reason_arcade
         return True, "replace_board legal"
 
     return False, "tipo de jugada no reconocido"

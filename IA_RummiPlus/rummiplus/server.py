@@ -7,6 +7,10 @@ Para Spring Boot; sin UI ni archivos estáticos.
 
 Usa ThreadingHTTPServer: cada petición se atiende en un hilo, así que varias
 partidas pueden pedir jugadas a la vez sin bloquearse entre sí.
+
+En modo arcade todo llega y sale por el mismo endpoint: el request incluye
+opcionalmente arcade.shop (oferta + saldo) y la respuesta puede incluir
+move.shop_choice con la compra elegida. No hay endpoint separado de tienda.
 """
 
 from __future__ import annotations
@@ -20,8 +24,9 @@ from http import HTTPStatus
 class BotAPIHandler(BaseHTTPRequestHandler):
     """
     Manejador HTTP: GET /api/health y POST /api/bot/move.
-    En POST lee JSON (board, pool_count, my_tiles, level...), construye estado,
-    pide jugada al bot y devuelve move + move_short en JSON.
+    En POST lee JSON (board, pool_count, my_tiles, level, arcade...), construye
+    estado, pide jugada al bot y devuelve move + move_short en JSON. En modo
+    arcade la jugada puede incluir item_use y/o shop_choice.
     """
 
     def log_message(self, format: str, *args: object) -> None:
@@ -45,9 +50,10 @@ class BotAPIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """
-        POST /api/bot/move: body JSON con estado (board, pool_count, my_tiles, ...).
-        Construye GameState, crea bot con level/randomness/seed del payload,
-        obtiene jugada y devuelve {"move": {...}, "move_short": "..."}.
+        POST /api/bot/move: body JSON con estado (board, pool_count, my_tiles, ...)
+        y opcionalmente bloque "arcade" (incluyendo arcade.shop si la tienda está
+        abierta este turno). Construye GameState, crea bot con level/randomness/seed
+        del payload, obtiene jugada y devuelve {"move": {...}, "move_short": "..."}.
         """
         if self.path != "/api/bot/move":
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -93,7 +99,3 @@ def main() -> None:
         pass
     finally:
         httpd.server_close()
-
-
-if __name__ == "__main__":
-    main()
