@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http import HTTPStatus
 
@@ -91,11 +92,35 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="Host")
     parser.add_argument("--port", type=int, default=8765, help="Puerto")
     args = parser.parse_args()
-    httpd = ThreadingHTTPServer((args.host, args.port), BotAPIHandler)
-    print(f"API bot: http://{args.host}:{args.port}/api/bot/move (concurrente)")
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), BotAPIHandler)
+    except OSError as e:
+        print(
+            f"ERROR: no se pudo escuchar en {args.host!r}:{args.port} — {e}",
+            file=sys.stderr,
+        )
+        print(
+            "  Sugerencias: prueba otro puerto (--port 8766), o cierra el programa que use ese puerto.",
+            file=sys.stderr,
+        )
+        print(
+            "  Si ves ModuleNotFoundError al arrancar, ejecuta el comando "
+            "desde la carpeta IA_RummiPlus (la que contiene el paquete rummiplus).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from e
+    print(
+        f"API bot: http://{args.host}:{args.port}/api/bot/move (concurrente)\n"
+        f"Health:  http://{args.host}:{args.port}/api/health",
+        flush=True,
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         httpd.server_close()
+
+
+if __name__ == "__main__":
+    main()
