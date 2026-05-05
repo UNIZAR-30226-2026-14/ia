@@ -342,6 +342,30 @@ def test_move_to_dict_variants() -> None:
     assert sc["buy"] is None
 
 
+def test_move_to_dict_orders_output_meld_tiles() -> None:
+    """La serialización ordena fichas en melds de salida (new_melds/new_board)."""
+    t1 = _tile("R03", 1)
+    t2 = _tile("B03", 2)
+    t3 = _tile("K03", 3)
+    t4 = _tile("O03", 4)
+
+    m_play = move_to_dict(
+        Move(
+            move_type=MoveType.PLAY_MELDS,
+            new_melds=[Meld(tiles=[t1, t2, t3, t4])],
+        )
+    )
+    assert m_play["new_melds"] == [["B03", "K03", "O03", "R03"]]
+
+    m_replace = move_to_dict(
+        Move(
+            move_type=MoveType.REPLACE_BOARD,
+            new_board=[Meld(tiles=[t1, t3, t2])],
+        )
+    )
+    assert m_replace["new_board"] == [["B03", "K03", "R03"]]
+
+
 def test_json_roundtrip_use_item() -> None:
     m = move_to_dict(
         Move(
@@ -540,6 +564,7 @@ ALL_TESTS = [
     test_state_from_bot_request_rejects_bad_item,
     test_state_from_bot_request_rejects_negative_shop_price,
     test_move_to_dict_variants,
+    test_move_to_dict_orders_output_meld_tiles,
     test_json_roundtrip_use_item,
     test_bot_use_item_plus_four_when_rival_low,
     test_bot_item_not_repeated_if_in_items_used,

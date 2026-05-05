@@ -130,6 +130,13 @@ def move_to_dict(move: Move) -> dict:
       - Si el request incluía arcade.shop.offer, se añade "shop_choice"
         (objeto con "buy" y "reason"). buy == null si el bot no compra.
     """
+    def _sorted_meld_tiles_short(meld: Meld) -> list[str]:
+        """
+        Ordena de forma estable y determinista las fichas dentro de un meld
+        solo para serialización de salida (no modifica estado ni decisiones).
+        """
+        return sorted((t.short() for t in meld.tiles))
+
     d: dict = {"move_type": move.move_type.value, "reason": move.reason}
     if move.move_type == MoveType.USE_ITEM:
         # USE_ITEM: solo item_use es relevante; no hay jugada del motor.
@@ -137,12 +144,12 @@ def move_to_dict(move: Move) -> dict:
             d["item_use"] = item_use_to_dict(move.item_use)
         return d
     if move.move_type == MoveType.PLAY_MELDS:
-        d["new_melds"] = [[t.short() for t in m.tiles] for m in move.new_melds]
+        d["new_melds"] = [_sorted_meld_tiles_short(m) for m in move.new_melds]
     elif move.move_type == MoveType.EXTEND_MELD:
         d["extend_index"] = move.extend_index
         d["extension_tiles"] = [t.short() for t in move.extension_tiles]
     elif move.move_type == MoveType.REPLACE_BOARD:
-        d["new_board"] = [[t.short() for t in m.tiles] for m in move.new_board]
+        d["new_board"] = [_sorted_meld_tiles_short(m) for m in move.new_board]
     if move.shop_choice is not None:
         d["shop_choice"] = shop_choice_to_dict(move.shop_choice)
     return d
