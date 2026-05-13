@@ -343,7 +343,7 @@ def test_move_to_dict_variants() -> None:
 
 
 def test_move_to_dict_orders_output_meld_tiles() -> None:
-    """La serialización ordena fichas en melds de salida (new_melds/new_board)."""
+    """La serialización ordena melds de salida de forma legible para el tablero."""
     t1 = _tile("R03", 1)
     t2 = _tile("B03", 2)
     t3 = _tile("K03", 3)
@@ -364,6 +364,33 @@ def test_move_to_dict_orders_output_meld_tiles() -> None:
         )
     )
     assert m_replace["new_board"] == [["B03", "K03", "R03"]]
+
+    run = move_to_dict(
+        Move(
+            move_type=MoveType.PLAY_MELDS,
+            new_melds=[
+                Meld(
+                    tiles=[
+                        _tile("O10", 10),
+                        _tile("O07", 7),
+                        _tile("O06", 6),
+                        _tile("O08", 8),
+                        _tile("O09", 9),
+                        _tile("O05", 5),
+                    ]
+                )
+            ],
+        )
+    )
+    assert run["new_melds"] == [["O05", "O06", "O07", "O08", "O09", "O10"]]
+
+    run_with_joker = move_to_dict(
+        Move(
+            move_type=MoveType.PLAY_MELDS,
+            new_melds=[Meld(tiles=[_tile("B07", 21), _tile("J*", 22), _tile("B05", 23)])],
+        )
+    )
+    assert run_with_joker["new_melds"] == [["B05", "J*", "B07"]]
 
 
 def test_json_roundtrip_use_item() -> None:

@@ -71,6 +71,7 @@ from .core import (
     tile_from_short,
 )
 from .move_logic import clone_state
+from .rules import is_valid_run, is_valid_set
 
 
 class ViewMode(str, Enum):
@@ -130,12 +131,51 @@ def move_to_dict(move: Move) -> dict:
       - Si el request incluía arcade.shop.offer, se añade "shop_choice"
         (objeto con "buy" y "reason"). buy == null si el bot no compra.
     """
-    def _sorted_meld_tiles_short(meld: Meld) -> list[str]:
+    def _ordered_run_tiles(tiles: list[Tile]) -> list[Tile]:
         """
-        Ordena de forma estable y determinista las fichas dentro de un meld
-        solo para serialización de salida (no modifica estado ni decisiones).
+        Ordena una escalera por valor y coloca comodines en los huecos que cubren.
+        Si hay varias ventanas posibles, usa la primera legal.
         """
-        return sorted((t.short() for t in meld.tiles))
+        jokers = [t for t in tiles if t.is_joker]
+        naturals = [t for t in tiles if not t.is_joker]
+        values = [t.value for t in naturals if t.value is not None]
+        if not values:
+            return list(tiles)
+
+        min_start = max(1, max(values) - len(tiles) + 1)
+        max_start = min(min(values), 13 - len(tiles) + 1)
+        by_value = {t.value: t for t in naturals if t.value is not None}
+        value_set = set(values)
+
+        for start in range(min_start, max_start + 1):
+            target = list(range(start, start + len(tiles)))
+            if not value_set.issubset(target):
+                continue
+            if len(set(target) - value_set) > len(jokers):
+                continue
+            ordered: list[Tile] = []
+            joker_idx = 0
+            for value in target:
+                tile = by_value.get(value)
+                if tile is not None:
+                    ordered.append(tile)
+                else:
+                    ordered.append(jokers[joker_idx])
+                    joker_idx += 1
+            return ordered
+        return sorted(tiles, key=lambda t: (t.value is None, t.value or 99, t.short()))
+
+    def _ordered_meld_tiles_short(meld: Meld) -> list[str]:
+        """
+        Ordena de forma semántica las fichas de salida para que el tablero se
+        pinte legible: escaleras por valor y grupos de forma estable.
+        """
+        tiles = list(meld.tiles)
+        if is_valid_run(tiles):
+            return [t.short() for t in _ordered_run_tiles(tiles)]
+        if is_valid_set(tiles):
+            return [t.short() for t in sorted(tiles, key=lambda t: (t.is_joker, t.short()))]
+        return [t.short() for t in tiles]
 
     d: dict = {"move_type": move.move_type.value, "reason": move.reason}
     if move.move_type == MoveType.USE_ITEM:
@@ -144,12 +184,12 @@ def move_to_dict(move: Move) -> dict:
             d["item_use"] = item_use_to_dict(move.item_use)
         return d
     if move.move_type == MoveType.PLAY_MELDS:
-        d["new_melds"] = [_sorted_meld_tiles_short(m) for m in move.new_melds]
+        d["new_melds"] = [_ordered_meld_tiles_short(m) for m in move.new_melds]
     elif move.move_type == MoveType.EXTEND_MELD:
         d["extend_index"] = move.extend_index
         d["extension_tiles"] = [t.short() for t in move.extension_tiles]
     elif move.move_type == MoveType.REPLACE_BOARD:
-        d["new_board"] = [_sorted_meld_tiles_short(m) for m in move.new_board]
+        d["new_board"] = [_ordered_meld_tiles_short(m) for m in move.new_board]
     if move.shop_choice is not None:
         d["shop_choice"] = shop_choice_to_dict(move.shop_choice)
     return d
